@@ -39,17 +39,50 @@ function loadSavedWidth(): number {
   return DEFAULT_WIDTH;
 }
 
-/** Status glyph by session state for scannability */
-const STATUS_GLYPH: Record<SessionStatus, string> = {
-  Running: "●",
-  Waiting: "◐",
-  Idle: "○",
+/** Animated spinner frames from rattles (https://github.com/vyfor/rattles) */
+const RATTLES: Record<string, { frames: string[]; interval: number }> = {
+  dots:         { frames: ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"], interval: 220 },
+  orbit:        { frames: ["⠃","⠉","⠘","⠰","⢠","⣀","⡄","⠆"], interval: 400 },
+  breathe:      { frames: ["⠀","⠂","⠌","⡑","⢕","⢝","⣫","⣟","⣿","⣟","⣫","⢝","⢕","⡑","⠌","⠂","⠀"], interval: 180 },
+};
+
+/** Which statuses get animated spinners vs static glyphs */
+const STATUS_RATTLE: Partial<Record<SessionStatus, keyof typeof RATTLES>> = {
+  Running: "dots",
+  Waiting: "orbit",
+  Starting: "breathe",
+};
+
+/** Static glyphs for non-animated statuses (braille family) */
+const STATIC_GLYPH: Record<SessionStatus, string> = {
+  Running: "⠋",
+  Waiting: "⠃",
+  Idle: "⠒",
   Error: "✕",
-  Starting: "◌",
-  Stopped: "■",
-  Unknown: "○",
+  Starting: "⠀",
+  Stopped: "⠒",
+  Unknown: "⠤",
   Deleting: "✕",
 };
+
+/** Animated status glyph that cycles through rattles frames */
+function StatusGlyph({ status }: { status: SessionStatus }) {
+  const rattleKey = STATUS_RATTLE[status];
+  const rattle = rattleKey ? RATTLES[rattleKey] : undefined;
+  const [frame, setFrame] = useState(0);
+
+  useEffect(() => {
+    if (!rattle) return;
+    const r = rattle;
+    const id = setInterval(() => {
+      setFrame((f) => (f + 1) % r.frames.length);
+    }, r.interval);
+    return () => clearInterval(id);
+  }, [rattle]);
+
+  if (!rattle) return <>{STATIC_GLYPH[status]}</>;
+  return <>{rattle.frames[frame % rattle.frames.length]}</>;
+}
 
 const SessionRow = memo(function SessionRow({
   workspace,
@@ -66,7 +99,6 @@ const SessionRow = memo(function SessionRow({
   const textClass = STATUS_TEXT_CLASS[sessionStatus] ?? "text-status-idle";
   const label =
     workspace.branch ?? workspace.sessions[0]?.title ?? "default";
-  const glyph = STATUS_GLYPH[sessionStatus] ?? "○";
 
   return (
     <button
@@ -81,11 +113,9 @@ const SessionRow = memo(function SessionRow({
     >
       <div className="flex items-center gap-2">
         <span
-          className={`text-[10px] shrink-0 leading-none ${textClass} ${
-            sessionStatus === "Waiting" ? "animate-pulse" : ""
-          }`}
+          className={`text-[10px] shrink-0 leading-none font-mono ${textClass}`}
         >
-          {glyph}
+          <StatusGlyph status={sessionStatus} />
         </span>
         <span className={`text-[13px] truncate flex-1 ${isActive ? "text-text-primary" : "text-text-secondary"}`} title={label}>
           {label}
