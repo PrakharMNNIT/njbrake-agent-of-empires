@@ -605,9 +605,12 @@ fn spawn_daemon(mode: ServeMode, passphrase: Option<&str>) -> Result<(), String>
         let _ = std::fs::remove_file(dir.join("serve.mode"));
     }
 
-    // Use a high ephemeral port so we don't collide with a user's own
-    // `aoe serve` on 8080.
-    let port: u16 = rand::rng().random_range(49152..65535);
+    // Reuse the port from the last TUI-launched daemon so the user can
+    // bookmark the URL and not have to re-paste it after every restart.
+    // Only generate a fresh random port on the very first launch (or if
+    // the persisted file is missing). This avoids colliding with a user's
+    // own `aoe serve` on the default 8080.
+    let port: u16 = load_or_generate_port();
 
     let mut cmd = Command::new(&exe);
     cmd.args(["serve", "--daemon", "--port", &port.to_string()]);
@@ -637,6 +640,16 @@ fn spawn_daemon(mode: ServeMode, passphrase: Option<&str>) -> Result<(), String>
         .map_err(|e| format!("Failed to launch `aoe serve --daemon`: {}", e))?;
 
     if !status.success() {
+        // If the daemon failed because the port was in use, clear the
+        // persisted port so the next attempt picks a fresh one instead
+        // of getting stuck on the same occupied port forever.
+        let tail = initial_log_tail().join("\n");
+        if tail.contains("EADDRINUSE") || tail.contains("Address already in use") {
+            if let Ok(dir) = crate::session::get_app_dir() {
+                let _ = std::fs::remove_file(dir.join("serve.last_port"));
+            }
+        }
+
         let hint = match mode {
             ServeMode::Tunnel => format!(
                 "Most likely `cloudflared` is not installed \
@@ -766,6 +779,28 @@ fn remember_last_mode(mode: ServeMode) {
     if let Ok(dir) = crate::session::get_app_dir() {
         let _ = std::fs::write(dir.join("serve.last_mode"), mode.file_token());
     }
+}
+
+/// Load a previously used port from `serve.last_port`, or generate a fresh
+/// random one in the ephemeral range and persist it. This keeps the URL
+/// stable across TUI daemon restarts so users can bookmark it.
+fn load_or_generate_port() -> u16 {
+    if let Ok(dir) = crate::session::get_app_dir() {
+        let port_path = dir.join("serve.last_port");
+        if let Ok(raw) = std::fs::read_to_string(&port_path) {
+            if let Ok(port) = raw.trim().parse::<u16>() {
+                if port >= 49152 {
+                    return port;
+                }
+            }
+        }
+        // No valid persisted port; generate and save one.
+        let port: u16 = rand::rng().random_range(49152..65535);
+        let _ = std::fs::write(&port_path, port.to_string());
+        return port;
+    }
+    // Can't access app dir; fall back to random (won't persist).
+    rand::rng().random_range(49152..65535)
 }
 
 fn log_file_path() -> Option<PathBuf> {
@@ -1984,5 +2019,62 @@ localhost\thttp://localhost:54321/?token=abc\n";
         assert_eq!(out.len(), 2);
         assert_eq!(out[1].label, None);
         assert_eq!(out[1].url, "http://no-label-here/");
+    }
+
+    // ── load_or_generate_port ────────────────────────────────────────────
+    //
+    // The real function reads from $APP_DIR/serve.last_port, which we can't
+    // control in unit tests. These tests exercise the same parse + validate
+    // + generate logic via a small shim that mirrors the function's core.
+
+    /// Mirrors load_or_generate_port's logic against an arbitrary directory
+    /// so we can test without touching the real app dir.
+    fn load_or_generate_port_from(dir: &std::path::Path) -> u16 {
+        let port_path = dir.join("serve.last_port");
+        if let Ok(raw) = std::fs::read_to_string(&port_path) {
+            if let Ok(port) = raw.trim().parse::<u16>() {
+                if port >= 49152 {
+                    return port;
+                }
+            }
+        }
+        let port: u16 = rand::rng().random_range(49152..65535);
+        let _ = std::fs::write(&port_path, port.to_string());
+        port
+    }
+
+    #[test]
+    fn load_or_generate_port_generates_and_persists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let port = load_or_generate_port_from(tmp.path());
+        assert!(port >= 49152, "generated port should be in ephemeral range");
+        // File was written
+        let raw = std::fs::read_to_string(tmp.path().join("serve.last_port")).unwrap();
+        assert_eq!(raw, port.to_string());
+    }
+
+    #[test]
+    fn load_or_generate_port_reuses_persisted() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("serve.last_port"), "55555").unwrap();
+        let port = load_or_generate_port_from(tmp.path());
+        assert_eq!(port, 55555);
+    }
+
+    #[test]
+    fn load_or_generate_port_rejects_low_port() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A port below the ephemeral range should be ignored and regenerated.
+        std::fs::write(tmp.path().join("serve.last_port"), "8080").unwrap();
+        let port = load_or_generate_port_from(tmp.path());
+        assert!(port >= 49152, "low port should be rejected: got {}", port);
+    }
+
+    #[test]
+    fn load_or_generate_port_handles_garbage_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("serve.last_port"), "not-a-number\n").unwrap();
+        let port = load_or_generate_port_from(tmp.path());
+        assert!(port >= 49152, "garbage content should be regenerated");
     }
 }
