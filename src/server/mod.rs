@@ -495,7 +495,9 @@ pub async fn start_server(config: ServerConfig<'_>) -> anyhow::Result<()> {
             // render the right transport label: "tunnel" for Cloudflare,
             // "tailscale" for Tailscale Funnel, "local" for local-only.
             let mode = format!("{}\n", handle.mode_label());
-            let _ = std::fs::write(app_dir.join("serve.mode"), mode);
+            if let Err(e) = std::fs::write(app_dir.join("serve.mode"), mode) {
+                tracing::debug!("Failed to write serve.mode: {e}");
+            }
         }
 
         // Start health monitor (uses CancellationToken internally)
@@ -554,7 +556,9 @@ pub async fn start_server(config: ServerConfig<'_>) -> anyhow::Result<()> {
                 contents.push('\n');
             }
             write_secret_file(&app_dir.join("serve.url"), &contents);
-            let _ = std::fs::write(app_dir.join("serve.mode"), "local\n");
+            if let Err(e) = std::fs::write(app_dir.join("serve.mode"), "local\n") {
+                tracing::debug!("Failed to write serve.mode: {e}");
+            }
         }
 
         None
